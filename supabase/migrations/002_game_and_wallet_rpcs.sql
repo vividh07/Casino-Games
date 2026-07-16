@@ -316,6 +316,9 @@ declare
   pweights int[] := array[2, 5, 12, 18, 26, 18, 12, 5, 2];
   idx int := 1;
   side text; dcard int; tcard int; winner text;
+  bj_move text;
+  p_cards int[] := array[]::int[];
+  d_cards int[] := array[]::int[];
 begin
   outcome := 'loss';
   payout := 0;
@@ -324,13 +327,62 @@ begin
   effective_bet := p_bet;
 
   if p_game = 'blackjack' then
-    player := 12 + floor(random()*10)::int;
-    dealer := 12 + floor(random()*10)::int;
-    doubled := coalesce((p_action->>'double')::boolean, false);
+    -- Server-dealt cards; move = stand | hit | double
+    bj_move := coalesce(
+      p_action->>'move',
+      case when coalesce((p_action->>'double')::boolean, false) then 'double' else 'stand' end
+    );
+    p_cards := array[]::int[];
+    d_cards := array[]::int[];
+    for i in 1..2 loop
+      p_cards := p_cards || (1 + floor(random()*13)::int);
+      d_cards := d_cards || (1 + floor(random()*13)::int);
+    end loop;
+
+    player := 0;
+    for i in 1..array_length(p_cards,1) loop
+      player := player + least(10, p_cards[i]);
+    end loop;
+    if (1 = any(p_cards)) and player + 10 <= 21 then player := player + 10; end if;
+
+    if bj_move = 'hit' then
+      while player < 17 loop
+        p_cards := p_cards || (1 + floor(random()*13)::int);
+        player := 0;
+        for i in 1..array_length(p_cards,1) loop
+          player := player + least(10, p_cards[i]);
+        end loop;
+        if (1 = any(p_cards)) and player + 10 <= 21 then player := player + 10; end if;
+        exit when player >= 21;
+      end loop;
+    elsif bj_move = 'double' then
+      p_cards := p_cards || (1 + floor(random()*13)::int);
+      player := 0;
+      for i in 1..array_length(p_cards,1) loop
+        player := player + least(10, p_cards[i]);
+      end loop;
+      if (1 = any(p_cards)) and player + 10 <= 21 then player := player + 10; end if;
+    end if;
+
+    dealer := 0;
+    for i in 1..array_length(d_cards,1) loop
+      dealer := dealer + least(10, d_cards[i]);
+    end loop;
+    if (1 = any(d_cards)) and dealer + 10 <= 21 then dealer := dealer + 10; end if;
+    while dealer < 17 loop
+      d_cards := d_cards || (1 + floor(random()*13)::int);
+      dealer := 0;
+      for i in 1..array_length(d_cards,1) loop
+        dealer := dealer + least(10, d_cards[i]);
+      end loop;
+      if (1 = any(d_cards)) and dealer + 10 <= 21 then dealer := dealer + 10; end if;
+    end loop;
+    if random() < 0.04 and dealer < 21 and dealer < player then
+      dealer := least(21, dealer + 1);
+    end if;
+
+    doubled := (bj_move = 'double');
     bet_eff := p_bet;
-    -- double is handled in play_game (extra debit); here we just mark payout basis
-    if doubled then bet_eff := p_bet; end if; -- caller passes full effective bet
-    if random() < 0.08 and dealer < 21 then dealer := least(21, dealer + 1); end if;
     if player > 21 then
       outcome := 'loss'; payout := 0;
     elsif dealer > 21 or player > dealer then
@@ -340,7 +392,14 @@ begin
     else
       outcome := 'loss'; payout := 0;
     end if;
-    details := jsonb_build_object('player', player, 'dealer', dealer, 'doubled', doubled);
+    details := jsonb_build_object(
+      'player', player,
+      'dealer', dealer,
+      'doubled', doubled,
+      'move', bj_move,
+      'player_cards', to_jsonb(p_cards),
+      'dealer_cards', to_jsonb(d_cards)
+    );
     if bet_eff > 0 then mult := payout / bet_eff; end if;
     effective_bet := bet_eff;
 
@@ -510,13 +569,17 @@ begin
   streak_mult := 1 + public._streak_bonus(p.win_streak);
 
   effective_bet := p_bet;
-  doubled := coalesce((p_action->>'double')::boolean, false) and p_game = 'blackjack';
+  doubled := p_game = 'blackjack' and (
+    coalesce((p_action->>'double')::boolean, false)
+    or coalesce(p_action->>'move', '') = 'double'
+  );
   if doubled then
     if w.pocket_balance < p_bet * 2 then
       doubled := false;
-      p_action := coalesce(p_action, '{}'::jsonb) || jsonb_build_object('double', false);
+      p_action := coalesce(p_action, '{}'::jsonb) || jsonb_build_object('double', false, 'move', 'stand');
     else
       effective_bet := p_bet * 2;
+      p_action := coalesce(p_action, '{}'::jsonb) || jsonb_build_object('double', true, 'move', 'double');
     end if;
   end if;
 

@@ -200,10 +200,36 @@ function resolveGame(
   streakMult: number,
 ): { outcome: PlayResult['outcome']; payout: number; mult: number; details: Record<string, unknown> } {
   if (game === 'blackjack') {
-    let player = 12 + Math.floor(Math.random() * 10)
-    let dealer = 12 + Math.floor(Math.random() * 10)
-    const doubled = Boolean(action.double)
-    if (Math.random() < 0.08 && dealer < 21) dealer = Math.min(21, dealer + 1)
+    const handValue = (cards: number[]) => {
+      let total = cards.reduce((s, c) => s + Math.min(10, c), 0)
+      if (cards.includes(1) && total + 10 <= 21) total += 10
+      return total
+    }
+    const draw = () => 1 + Math.floor(Math.random() * 13)
+    const move =
+      String(action.move || '') || (action.double ? 'double' : 'stand')
+    const player_cards = [draw(), draw()]
+    const dealer_cards = [draw(), draw()]
+    let player = handValue(player_cards)
+    if (move === 'hit') {
+      while (player < 17) {
+        player_cards.push(draw())
+        player = handValue(player_cards)
+        if (player >= 21) break
+      }
+    } else if (move === 'double') {
+      player_cards.push(draw())
+      player = handValue(player_cards)
+    }
+    let dealer = handValue(dealer_cards)
+    while (dealer < 17) {
+      dealer_cards.push(draw())
+      dealer = handValue(dealer_cards)
+    }
+    if (Math.random() < 0.04 && dealer < 21 && dealer < player) {
+      dealer = Math.min(21, dealer + 1)
+    }
+    const doubled = move === 'double'
     let outcome: PlayResult['outcome'] = 'loss'
     let payout = 0
     if (player > 21) {
@@ -220,7 +246,7 @@ function resolveGame(
       outcome,
       payout,
       mult: bet ? payout / bet : 0,
-      details: { player, dealer, doubled },
+      details: { player, dealer, doubled, move, player_cards, dealer_cards },
     }
   }
 
@@ -617,9 +643,13 @@ export const demoApi = {
     const w = db.wallets[userId]
     const p = db.profiles[userId]
     let effectiveBet = bet
-    if (game === 'blackjack' && action.double) {
-      if (w.pocket_balance >= bet * 2) effectiveBet = bet * 2
-      else action = { ...action, double: false }
+    if (game === 'blackjack' && (action.double || action.move === 'double')) {
+      if (w.pocket_balance >= bet * 2) {
+        effectiveBet = bet * 2
+        action = { ...action, double: true, move: 'double' }
+      } else {
+        action = { ...action, double: false, move: 'stand' }
+      }
     }
     if (w.pocket_balance < effectiveBet) throw new Error('Insufficient pocket balance')
 
